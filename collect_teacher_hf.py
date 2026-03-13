@@ -18,7 +18,8 @@ DATASET_NAME = "databricks/databricks-dolly-15k"
 CACHE_FILE = "datasets/dolly_prompts.jsonl.gz"
 OUTPUT_FILE = "teacher_dataset.jsonl"
 BATCH_SIZE = 10
-WAIT_ON_429 = 600  # 10 minutes
+RETRY_DELAY = 600  # 10 minutes
+MAX_RETRIES = 3
 
 
 # =========================
@@ -70,11 +71,7 @@ def load_processed_from_output():
             try:
                 data = json.loads(line)
 
-                # Support BOTH legacy and new schema
-                if "prompt" in data:
-                    processed.add(data["prompt"])
-                elif "instruction" in data:
-                    processed.add(data["instruction"])
+                processed.add(data["prompt"])
 
             except:
                 continue
@@ -86,7 +83,10 @@ def load_processed_from_output():
 # MAIN
 # =========================
 def main():
-    client = Client()
+    client = Client(
+        host='https://ollama.com:443',
+        headers={'Authorization': 'Bearer ' + str(os.environ.get('KEY_2'))}
+    )
 
     prompts = load_or_cache_dataset()
     processed_prompts = load_processed_from_output()
@@ -121,7 +121,8 @@ def main():
 
             messages = [{"role": "user", "content": full_prompt}]
 
-            # Retry loop
+            # Retry loop: 3 retries for 500 errors, then wait and retry once more
+            retries = 0
             while True:
                 try:
                     response_text = ""
@@ -138,9 +139,14 @@ def main():
                 except ResponseError as e:
                     if e.status_code == 429:
                         print("Rate limit hit. Waiting 10 minutes...")
-                        time.sleep(WAIT_ON_429)
+                        time.sleep(RETRY_DELAY)
+                    elif e.status_code >= 500 and retries < MAX_RETRIES:
+                        retries += 1
+                        print(f"Server error {e.status_code}. Retry {retries}/{MAX_RETRIES}...")
+                        time.sleep(2 ** retries)  # Exponential backoff: 2s, 4s, 8s
                     else:
-                        raise
+                        print(f"Server error {e.status_code}. Waiting 10 minutes...")
+                        time.sleep(RETRY_DELAY)
 
             # Always write using "prompt" (single canonical format)
             outfile.write(json.dumps({
